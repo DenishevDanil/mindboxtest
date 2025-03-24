@@ -1,0 +1,92 @@
+---
+# Определяю Deployment для приложения
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  labels:
+    app: web-app
+spec:
+  replicas: 4  # Устанавливаю 4 реплики, так как это покрывает пиковую нагрузку по нагрузочному тесту
+  selector:
+    matchLabels:
+      app: web-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1  # Позволяю одну дополнительную поду во время обновления
+      maxUnavailable: 0  # Не допускаю недоступности под во время обновления для отказоустойчивости
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      # Распределяю поды по разным зонам для повышения отказоустойчивости
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: web-app
+      containers:
+        - name: web-app
+          image: web-app:latest  # Предполагаемый image в реестре называется web-app
+          resources:
+            requests:
+              memory: "128Mi"  # Фиксирую запрос памяти на ровном уровне потребления
+              cpu: "0.1"      # Устанавливю минимальный запрос CPU для нормальной работы
+            limits:
+              memory: "256Mi"  # Ограничиваю память чуть выше requests для стабильности
+              cpu: "1"        # Даю запас CPU для инициализации и первых запросов
+          readinessProbe:
+            httpGet:
+              path: /health  # Предполагаемый эндпоинт для проверки готовности
+              port: 8080
+            initialDelaySeconds: 10  # Даю 10 секунд на инициализацию, как указано в задаче
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15  # Даю чуть больше времени перед проверкой "живости"
+            periodSeconds: 10
+---
+# HorizontalPodAutoscaler для автоматического масштабирования
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 2  # Минимально 2 пода ночью для отказоустойчивости
+  maxReplicas: 6  # Максимум 6 под для пиковых нагрузок с запасом
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Цель - 70% использования CPU для масштабирования
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60  # Быстрое масштабирование вверх при нагрузке
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Более медленное масштабирование вниз
+---
+# Service для доступа к приложению
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-service
+spec:
+  selector:
+    app: web-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP  # Использую ClusterIP, предполагая, что доступ через Ingress снаружи
